@@ -1,0 +1,75 @@
+node {
+    env.SLACK_CHANNEL = 'jenkins'
+    env.EMAIL_RECIPIENTS = 'rohit.chopra@mygurukulam.co'
+    def branch_name = 'main'
+    def repo_url = 'https://github.com/OT-MICROSERVICES/attendance-api.git'
+    def PRIORITY_LEVEL = 'P0'
+    def VENV_DIR = "venv"
+    def REPORT_PATH = "prospector-report.json"  // Define report path
+
+    try {
+        stage('Clean Workspace') {
+            cleanWs()  
+        }
+
+        stage('Git Clone') {
+            checkout([$class: 'GitSCM', 
+                      branches: [[name: branch_name]], 
+                      userRemoteConfigs: [[url: repo_url, credentialsId: 'gitcred']]
+            ])
+        }
+
+        stage('Install Dependencies') {
+            sh '''
+                sudo apt-get update -y
+                sudo apt-get install -y python3 python3-venv python3-pip
+            '''
+        }
+
+        stage('Setup Virtual Environment') {
+            sh """
+                if [ ! -d "${VENV_DIR}" ]; then
+                    python3 -m venv ${VENV_DIR}
+                fi
+                /bin/bash -c "source ${VENV_DIR}/bin/activate && \
+                pip install --upgrade pip && \
+                pip install pytest prospector"
+            """
+        }
+
+        stage('Static Code Analysis (Prospector)') {
+            sh """
+                /bin/bash -c "source ${VENV_DIR}/bin/activate && \
+                prospector --output-format json > ${REPORT_PATH} || echo 'Static analysis completed with warnings.'"
+                cat ${REPORT_PATH}  # Display results in Jenkins logs
+            """
+        }
+
+        stage('Archive Artifacts') {
+            archiveArtifacts artifacts: "${REPORT_PATH}", fingerprint: true
+        }
+
+    } catch (err) {
+        currentBuild.result = 'FAILURE'
+        throw err
+    } finally {
+        stage('Notify') {
+            def buildStatus = currentBuild.result ?: 'SUCCESS'
+            notify(buildStatus, PRIORITY_LEVEL, env.SLACK_CHANNEL, env.EMAIL_RECIPIENTS)
+        }
+    }
+}
+
+def notify(String buildStatus, String priority, String slackChannel, String emailRecipients) {
+    def icons = ['SUCCESS': '🟢', 'FAILURE': '🔴']
+    def colors = ['SUCCESS': 'good', 'FAILURE': 'danger']
+    def subjects = [
+        'SUCCESS': "${priority} SUCCESS: Jenkins Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+        'FAILURE': "${priority} FAILURE: Jenkins Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'"
+    ]
+    def message = "${icons[buildStatus]} ${priority} ${buildStatus}: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' <${env.BUILD_URL}|Details>"
+
+    slackSend(channel: slackChannel, color: colors[buildStatus], message: message, tokenCredentialId: 'slack')
+
+    mail(to: emailRecipients, subject: subjects[buildStatus], body: "${message}\n\nCheck details here: ${env.BUILD_URL}")
+}
